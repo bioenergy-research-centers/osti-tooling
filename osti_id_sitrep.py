@@ -661,6 +661,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Scrape Scholar titles and find OSTI IDs."
     )
+   parser.add_argument("--config", help="path to .ini config file to load arguments from")
     parser.add_argument(
         "--sample",
         type=int,
@@ -678,5 +679,8 @@ if __name__ == "__main__":
             "separately before use."
         ),
     )
+    parser.add_argument("--STOP_YEAR", default="2016", help="Year you want to stop the search")
+
+   
     args = parser.parse_args()
     run(sample=args.sample, browser=args.browser)
