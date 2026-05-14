@@ -1,3 +1,14 @@
+# osti_id_sitrep.py
+
+Code is set to run playwright or selenium.
+```
+# Test with 10 titles using browser mode
+python3 osti_id_sitrep.py --sample 10 --browser playwright
+
+# Full run
+python3 osti_id_sitrep.py --browser playwright
+```
+
 # OSTI Hourly Sync Deployment
 
 This directory contains the refactored OSTI sync infrastructure, designed for shared machine access and multi-developer/multi-agent operations.
