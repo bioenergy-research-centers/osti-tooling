@@ -537,7 +537,7 @@ def _csv_contains_title(path: Path, title: str) -> bool:
 
     target_title = normalize_title(title)
     with path.open("r", newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
+        reader = csv.DictReader(f, delimiter="|")
         for row in reader:
             existing_title = row.get("title")
             if existing_title and normalize_title(existing_title) == target_title:
@@ -552,7 +552,7 @@ def append_matched(title: str, osti_id: str, osti_url: str) -> None:
         log.info("Skipping matched duplicate already in CSV: %r", title)
         return
     with MATCHED_FILE.open("a", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer = csv.DictWriter(f, fieldnames=fieldnames, delimiter="|")
         writer.writerow({"title": title, "osti_id": osti_id, "osti_url": osti_url})
 
 
@@ -569,7 +569,7 @@ def append_unmatched(title: str, reason: str) -> None:
         log.info("Skipping unmatched duplicate already in CSV: %r", title)
         return
     with UNMATCHED_FILE.open("a", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer = csv.DictWriter(f, fieldnames=fieldnames, delimiter="|")
         writer.writerow({"title": title, "reason": reason})
 
 
@@ -661,7 +661,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Scrape Scholar titles and find OSTI IDs."
     )
-   parser.add_argument("--config", help="path to .ini config file to load arguments from")
     parser.add_argument(
         "--sample",
         type=int,
@@ -679,8 +678,5 @@ if __name__ == "__main__":
             "separately before use."
         ),
     )
-    parser.add_argument("--STOP_YEAR", default="2016", help="Year you want to stop the search")
-
-   
     args = parser.parse_args()
     run(sample=args.sample, browser=args.browser)
