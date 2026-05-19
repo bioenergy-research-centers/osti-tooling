@@ -54,14 +54,15 @@ tail -50 $OSTI_ROOT/logs/osti_workflow.log
 
 ### 3. Install 6-Hour Cron Job
 ```bash
-(crontab -l 2>/dev/null; echo '0 */6 * * * /usr/bin/python3 "$OSTI_ROOT/osti-tooling/gscholscrape.py" --all >> "$OSTI_ROOT/logs/osti_workflow.log" 2>&1') | crontab -
+echo "0 */6 * * * nobody /usr/bin/python3 $OSTI_ROOT/osti-tooling/gscholscrape.py --all >> $OSTI_ROOT/logs/osti_workflow.log 2>&1" | sudo tee /etc/cron.d/osti-sync >/dev/null
+sudo chmod 644 /etc/cron.d/osti-sync
 ```
 
-This runs at 00:00, 06:00, 12:00, and 18:00.
+This runs at 00:00, 06:00, 12:00, and 18:00 as the `nobody` user.
 
 ### 4. Verify Cron Installation
 ```bash
-sudo crontab -l
+sudo cat /etc/cron.d/osti-sync
 sudo tail -20 $OSTI_ROOT/logs/cron.log
 ```
 
