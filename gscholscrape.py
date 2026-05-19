@@ -1,6 +1,6 @@
 """
-osti_id_sitrep.py
-=================
+gscholscrape.py
+===============
 Hourly scholar collector for the OSTI workflow.
 
 Stage 1 scrapes publication titles from a Google Scholar profile page, sorted
@@ -24,7 +24,7 @@ Dependencies
 
 Run
 ---
-    python osti_id_sitrep.py [--sample N] [--all] [--browser {playwright,selenium}]
+    python gscholscrape.py [--sample N] [--all] [--browser {playwright,selenium}]
 
     --sample N   Process only the first N titles
     --all        Process all titles (overrides default development limit)
@@ -100,14 +100,12 @@ SCHOLAR_OUTPUT_FILE = Path(
     )
 )
 DOWNSTREAM_SYNC_SCRIPT = Path(
-    os.getenv("DOWNSTREAM_SYNC_SCRIPT", "/opt/osti/bin/osti_hourly_sync.sh")
+    os.getenv("DOWNSTREAM_SYNC_SCRIPT", "/opt/osti/osti-tooling/downstream_sync.py")
 )
 
 # BRC schema transformation settings
 BRC_SCHEMA_DIR = Path(os.getenv("BRC_SCHEMA_DIR", "/opt/osti/brc-schema"))
 BRC_OUTPUT_FILE = SCRIPT_DIR / "osti_brc_transformed.json"
-PAGES_TO_ELINK_SCRIPT = SCRIPT_DIR / "pages_to_elink_transform.py"
-ELINK_INTERMEDIATE_FILE = SCRIPT_DIR / "osti_matched_elink.json"
 
 # Realistic browser-like headers for static HTTP requests.
 HTTP_HEADERS = {
@@ -983,50 +981,6 @@ def _run_brc_transform(input_file: Path, output_file: Path) -> bool:
     except Exception as exc:
         log.error("Unexpected error running transform: %s", exc)
         return False
-
-    def _run_pages_to_elink_transform(input_file: Path, output_file: Path) -> bool:
-        """Run the PAGES to ELINK schema transformation.
-    
-        Returns True if successful, False otherwise.
-        """
-        if not input_file.exists():
-            log.error("Input file does not exist: %s", input_file)
-            return False
-    
-        if not PAGES_TO_ELINK_SCRIPT.exists():
-            log.error("Transformation script not found: %s", PAGES_TO_ELINK_SCRIPT)
-            return False
-    
-        try:
-            log.info("Running PAGES to ELINK transformation on %s", input_file)
-            cmd = ["python3", str(PAGES_TO_ELINK_SCRIPT), str(input_file), str(output_file)]
-        
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=60
-            )
-        
-            if result.returncode == 0:
-                log.info("PAGES to ELINK transform completed: %s", output_file)
-                return True
-            else:
-                log.error("PAGES to ELINK transform failed with return code %d", result.returncode)
-                if result.stdout:
-                    log.error("stdout: %s", result.stdout)
-                if result.stderr:
-                    log.error("stderr: %s", result.stderr)
-                return False
-        except FileNotFoundError:
-            log.error("python3 command not found")
-            return False
-        except subprocess.TimeoutExpired:
-            log.error("PAGES to ELINK transform timed out after 60 seconds")
-            return False
-        except Exception as exc:
-            log.error("Unexpected error running PAGES to ELINK transform: %s", exc)
-            return False
 
 
     def _run_elink_to_brc_transform(input_file: Path, output_file: Path) -> bool:

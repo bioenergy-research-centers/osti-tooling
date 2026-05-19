@@ -1,51 +1,78 @@
-# osti_id_sitrep.py
+# gscholscrape.py
 
 Code is set to run playwright or selenium.
 ```
 # Test with 10 titles using browser mode
-python3 osti_id_sitrep.py --sample 10 --browser playwright
+python3 gscholscrape.py --sample 10 --browser playwright
+
+# Default development mode (first 10 titles)
+python3 gscholscrape.py --browser playwright
 
 # Full run
-python3 osti_id_sitrep.py --browser playwright
+python3 gscholscrape.py --all --browser playwright
 ```
 
-# OSTI Hourly Sync Deployment
+The standalone script writes JSON output files next to the script:
+- `osti_matched.json`
+- `osti_unmatched.json`
+
+`osti_matched.json` now stores enriched records for each match, including:
+- validated `osti_id` and `osti_url`
+- normalized publication fields (`title`, `authors`, `doi`, `publication_date`, etc.)
+- captured OSTI detail-page JSON-LD `payload` for downstream bioenergy.org-ready processing
+
+The collector reads live `/var/www/html/cbi.json` and skips OSTI IDs already
+present there to reduce repeat OSTI lookups.
+
+# OSTI 6-Hour Sync Deployment
 
 This directory contains the refactored OSTI sync infrastructure, designed for shared machine access and multi-developer/multi-agent operations.
+
+## Installation Layout
+
+Pick one root directory for the OSTI workspace, for example `OSTI_ROOT=/path/to/osti-root`.
+This repo should live at `$OSTI_ROOT/osti-tooling`, and the `brc-schema` repo
+should live alongside it at `$OSTI_ROOT/brc-schema`. The scripts default to
+those paths, but the location can be changed by setting the environment
+variables in `$OSTI_ROOT/env` or by exporting them before running the scripts.
 
 ## Quick Start
 
 ### 1. Configuration
-Edit `/opt/osti/env` to set your ELINK_BEARER_TOKEN (or ensure `/var/www/OSTI_config.ini` has it):
+Edit `$OSTI_ROOT/env` to set your ELINK_BEARER_TOKEN (or ensure
+`/var/www/OSTI_config.ini` has it):
 ```bash
-nano /opt/osti/env
+nano $OSTI_ROOT/env
 # Uncomment and fill: ELINK_BEARER_TOKEN="your-token-here"
 ```
 
 ### 2. Manual Test Run
 ```bash
-/opt/osti/bin/osti_hourly_sync.sh
-tail -50 /opt/osti/logs/latest_osti_hourly_sync.log
+python3 $OSTI_ROOT/osti-tooling/gscholscrape.py --all
+tail -50 $OSTI_ROOT/logs/osti_workflow.log
 ```
 
-### 3. Install Hourly Cron Job
+### 3. Install 6-Hour Cron Job
 ```bash
-sudo /opt/osti/bin/install_osti_hourly_cron.sh
+(crontab -l 2>/dev/null; echo '0 */6 * * * /usr/bin/python3 "$OSTI_ROOT/osti-tooling/gscholscrape.py" --all >> "$OSTI_ROOT/logs/osti_workflow.log" 2>&1') | crontab -
 ```
+
+This runs at 00:00, 06:00, 12:00, and 18:00.
 
 ### 4. Verify Cron Installation
 ```bash
 sudo crontab -l
-sudo tail -20 /opt/osti/logs/cron.log
+sudo tail -20 $OSTI_ROOT/logs/cron.log
 ```
 
 ## Directory Structure
 
 ```
-/opt/osti/
+$OSTI_ROOT/
+├── downstream_sync.py                # Main downstream sync script
+├── gscholscrape.py                   # Scholar scrape + trigger logic
 ├── bin/
-│   ├── osti_hourly_sync.sh           # Main sync script
-│   └── install_osti_hourly_cron.sh   # Cron installer
+│   └── install_osti_hourly_cron.sh   # Legacy cron installer
 ├── env                                # Environment config (edit this)
 ├── etc_cron.d_osti-sync.template     # Cron template
 ├── brc-schema/                        # Symlink to brc-schema repo
@@ -62,6 +89,7 @@ sudo tail -20 /opt/osti/logs/cron.log
 
 Each run generates timestamped JSON files:
 
+- `latest_osti_scholar_records.json` - Additive scholar cache used by the 6-hour cron job
 - `osti_records_*.json` - All OSTI records (raw, with metadata cleanup)
 - `osti_publications_*.json` - Publications only (product_type: JA, B, TR, AR, P, PA)
 - `osti_datasets_*.json` - Datasets only (product_type: DA)
@@ -79,19 +107,22 @@ Plus symlinks to latest:
 
 Published files are copied to:
 - `/var/www/html/CBI/cbi_osti.json` - All records (backward compatible)
-- `/var/www/html/CBI/cbi.json` - BRC datasets (backward compatible)
+- `/var/www/html/cbi.json` - BRC datasets (append-only, validated before publish)
+
+The downstream OSTI sync runs only when the scholar cache changes.
+If the scrape output is unchanged, downstream processing is skipped.
 
 ## Configuration
 
-Edit `/opt/osti/env` to customize:
+Edit `$OSTI_ROOT/env` to customize:
 
 ```bash
 # Core paths
-REPO_DIR="/opt/osti/brc-schema"
-STATE_DIR="/opt/osti/state"
-OUT_DIR="/opt/osti/state/runs"
-LOG_DIR="/opt/osti/logs"
-LOCK_FILE="/opt/osti/state/osti_hourly_sync.lock"
+REPO_DIR="$OSTI_ROOT/brc-schema"
+STATE_DIR="$OSTI_ROOT/state"
+OUT_DIR="$OSTI_ROOT/state/runs"
+LOG_DIR="$OSTI_ROOT/logs"
+LOCK_FILE="$OSTI_ROOT/state/osti_hourly_sync.lock"
 
 # API configuration (required)
 ELINK_BEARER_TOKEN="your-bearer-token"  # OR use /var/www/OSTI_config.ini
@@ -101,9 +132,9 @@ ELINK_PAGE_SIZE="500"
 
 # Web publishing
 WEB_OSTI_JSON="/var/www/html/CBI/cbi_osti.json"
-WEB_BRC_JSON="/var/www/html/CBI/cbi.json"
+WEB_BRC_JSON="/var/www/html/cbi.json"
 
-# Retention policy (168 = 7 days of hourly runs)
+# Retention policy (168 = 42 days at 4 runs/day)
 KEEP_RUNS="168"
 ```
 
@@ -115,16 +146,16 @@ KEEP_RUNS="168"
 grep -i token /var/www/OSTI_config.ini
 
 # Or set in env file
-echo 'ELINK_BEARER_TOKEN="your-token"' >> /opt/osti/env
+echo 'ELINK_BEARER_TOKEN="your-token"' >> $OSTI_ROOT/env
 ```
 
 ### Manual run fails
 ```bash
-/opt/osti/bin/osti_hourly_sync.sh
+$OSTI_ROOT/osti-tooling/downstream_sync.py
 # Check log immediately:
-cat /opt/osti/logs/latest_osti_hourly_sync.log
+cat $OSTI_ROOT/logs/latest_osti_hourly_sync.log
 ```
-Note if the script errors it will not symlink latest_osti_hourly_sync.log. The log can still be found in /opt/osti/logs/YYYYMMDDTHHMMSSZ.log.
+Note if the script errors it will not symlink latest_osti_hourly_sync.log. The log can still be found in $OSTI_ROOT/logs/YYYYMMDDTHHMMSSZ.log.
 
 ### Cron not running
 ```bash
@@ -132,7 +163,7 @@ Note if the script errors it will not symlink latest_osti_hourly_sync.log. The l
 sudo cat /etc/cron.d/osti-sync
 
 # Check cron logs
-sudo tail -50 /opt/osti/logs/cron.log
+sudo tail -50 $OSTI_ROOT/logs/cron.log
 
 # Check system cron logs (if available)
 sudo journalctl -u cron --since "1 hour ago"
@@ -152,22 +183,22 @@ If you can't write to web directories:
 
 ### Live log monitoring
 ```bash
-tail -f /opt/osti/logs/cron.log
+tail -f $OSTI_ROOT/logs/cron.log
 ```
 
 ### Check last 5 runs
 ```bash
-ls -lt /opt/osti/state/runs/osti_records_*.json | head -5
+ls -lt $OSTI_ROOT/state/runs/osti_records_*.json | head -5
 ```
 
 ### Verify latest files
 ```bash
 # Show latest files and their size
-ls -lh /opt/osti/state/runs/latest_*.json
+ls -lh $OSTI_ROOT/state/runs/latest_*.json
 ```
 
 ### Check record counts
 ```bash
-jq '.records | length' /opt/osti/state/runs/latest_osti_publications.json
-jq '.records | length' /opt/osti/state/runs/latest_osti_datasets.json
+jq '.records | length' $OSTI_ROOT/state/runs/latest_osti_publications.json
+jq '.records | length' $OSTI_ROOT/state/runs/latest_osti_datasets.json
 ```
