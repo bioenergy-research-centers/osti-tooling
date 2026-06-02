@@ -1,0 +1,167 @@
+name: OSTI 6-Hour Sync
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'   # Runs at 00:00, 06:00, 12:00, 18:00 UTC
+  workflow_dispatch:          # Allow manual trigger
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    env:
+      # ── Scholar scraper paths ──────────────────────────────────────────────
+      SCHOLAR_OUTPUT_DIR:   ${{ github.workspace }}/scholar_output
+      SCHOLAR_OUTPUT_FILE:  ${{ github.workspace }}/scholar_output/latest_osti_scholar_records.json
+      # ── downstream_sync.py paths ──────────────────────────────────────────
+      SCHOLAR_JSON:         ${{ github.workspace }}/scholar_output/latest_osti_scholar_records.json
+      REPO_DIR:             ${{ github.workspace }}/brc-schema
+      BRC_SCHEMA_DIR:       ${{ github.workspace }}/brc-schema
+      STATE_DIR:            ${{ github.workspace }}/state
+      OUT_DIR:              ${{ github.workspace }}/state/runs
+      ELINK_OUT_DIR:        ${{ github.workspace }}/state/elink_output
+      BRC_OUT_DIR:          ${{ github.workspace }}/state/brc_output
+      LOG_DIR:              ${{ github.workspace }}/logs
+      WORKFLOW_LOG:         ${{ github.workspace }}/logs/osti_workflow.log
+      LOG_FILE:             ${{ github.workspace }}/logs/osti_workflow.log
+      LOCK_FILE:            ${{ github.workspace }}/state/osti_hourly_sync.lock
+      # ── Output destinations (overrides /var/www/html defaults) ────────────
+      WEB_BRC_JSON:         ${{ github.workspace }}/output/cbi.json
+      WEB_OSTI_JSON:        ${{ github.workspace }}/output/cbi_osti.json
+      WEB_PUBLICATIONS_JSON: ${{ github.workspace }}/output/cbi_publications.json
+      # ── uv / XDG cache dirs ───────────────────────────────────────────────
+      UV_CACHE_DIR:     ${{ github.workspace }}/state/uv-cache
+      XDG_CACHE_HOME:   ${{ github.workspace }}/state/.cache
+      XDG_DATA_HOME:    ${{ github.workspace }}/state/.data
+      PYSTOW_HOME:      ${{ github.workspace }}/state/pystow
+
+    steps:
+      # ── Checkout all three repos ──────────────────────────────────────────
+      - name: Checkout osti-tooling
+        uses: actions/checkout@v4
+        with:
+          path: osti-tooling
+
+      - name: Checkout brc-schema
+        uses: actions/checkout@v4
+        with:
+          repository: bioenergy-research-centers/brc-schema
+          path: brc-schema
+
+      - name: Checkout brc_data_feeds
+        uses: actions/checkout@v4
+        with:
+          repository: bioenergy-research-centers/brc_data_feeds
+          token: ${{ secrets.BRCDATA_PUSH_TOKEN }}
+          path: brc_data_feeds
+
+      # ── Tool setup ────────────────────────────────────────────────────────
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install scholar scraper dependencies
+        run: |
+          pip install requests beautifulsoup4 playwright
+          playwright install chromium --with-deps
+
+      - name: Cache brc-schema uv environment
+        uses: actions/cache@v4
+        with:
+          path: |
+            brc-schema/.venv
+            ${{ github.workspace }}/state/uv-cache
+          key: uv-brc-schema-${{ hashFiles('brc-schema/uv.lock') }}
+          restore-keys: uv-brc-schema-
+
+      - name: Sync brcschema environment
+        run: uv sync
+        working-directory: brc-schema
+
+      # ── Working directories ───────────────────────────────────────────────
+      - name: Create working directories
+        run: |
+          mkdir -p scholar_output \
+                   state/runs state/elink_output state/brc_output \
+                   state/uv-cache state/.cache state/.data state/pystow \
+                   logs output
+
+      # ── Restore scholar OSTI-ID cache from previous run ──────────────────
+      - name: Restore scholar cache
+        uses: actions/cache/restore@v4
+        with:
+          path: scholar_output/latest_osti_scholar_records.json
+          key: scholar-cache-${{ github.run_id }}
+          restore-keys: scholar-cache-
+
+      # ── Stage the existing cbi.json so gscholscrape can skip known IDs ───
+      - name: Stage existing cbi.json for deduplication
+        run: |
+          if [ -f brc_data_feeds/cbi.json ]; then
+            sudo mkdir -p /var/www/html
+            sudo cp brc_data_feeds/cbi.json /var/www/html/cbi.json
+            echo "Staged existing cbi.json ($(wc -c < brc_data_feeds/cbi.json) bytes)"
+          else
+            echo "No existing cbi.json found — first run"
+          fi
+
+      # ── Step 1: update scholar → OSTI-ID cache ───────────────────────────
+      # Set DOWNSTREAM_SYNC_SCRIPT=/bin/true so gscholscrape only updates the
+      # cache and does NOT trigger downstream_sync here (we run it explicitly
+      # below so it always fires, not just when the cache changes).
+      - name: Run Google Scholar scrape (update OSTI ID cache)
+        env:
+          ELINK_BEARER_TOKEN: ${{ secrets.ELINK_BEARER_TOKEN }}
+          DOWNSTREAM_SYNC_SCRIPT: /bin/true
+        run: python osti-tooling/gscholscrape.py --all --browser playwright
+
+      # ── Step 2: fetch OSTI records and produce cbi.json ──────────────────
+      - name: Run downstream OSTI sync
+        env:
+          ELINK_BEARER_TOKEN: ${{ secrets.ELINK_BEARER_TOKEN }}
+        run: python osti-tooling/downstream_sync.py
+
+      # ── Save updated scholar cache for next run ───────────────────────────
+      - name: Save scholar cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: scholar_output/latest_osti_scholar_records.json
+          key: scholar-cache-${{ github.run_id }}
+
+      # ── Always show the run log for debugging ─────────────────────────────
+      - name: Show workflow log
+        if: always()
+        run: cat logs/osti_workflow.log || echo "No log produced"
+
+      # ── Push cbi.json to brc_data_feeds ──────────────────────────────────
+      - name: Commit and push cbi.json to brc_data_feeds
+        run: |
+          if [ ! -f output/cbi.json ]; then
+            echo "::error::cbi.json was not produced — aborting"
+            exit 1
+          fi
+
+          cp output/cbi.json brc_data_feeds/cbi.json
+
+          cd brc_data_feeds
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add cbi.json
+
+          if git diff --staged --quiet; then
+            echo "cbi.json is unchanged — no commit needed"
+          else
+            TIMESTAMP=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+            git commit -m "chore: update cbi.json from OSTI sync ${TIMESTAMP}"
+            git push
+            echo "Pushed updated cbi.json"
+          fi
