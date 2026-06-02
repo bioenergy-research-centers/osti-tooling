@@ -1,0 +1,2 @@
+# CBI-specific workflow requires CBI team approval for any changes
+.github/workflows/osti-cbi-sync.yml    @bioenergy-research-centers/cbi-team
