@@ -127,7 +127,7 @@ jobs:
       - name: Run downstream OSTI sync
         env:
           ELINK_BEARER_TOKEN: ${{ secrets.ELINK_BEARER_TOKEN }}
-        run: python osti-tooling/downstream_sync.py
+        run: brc-schema/.venv/bin/python osti-tooling/downstream_sync.py
 
       # ── Save updated scholar cache for next run ───────────────────────────
       - name: Save scholar cache
