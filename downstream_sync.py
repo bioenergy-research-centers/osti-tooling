@@ -128,6 +128,14 @@ class Settings:
     site_ownership_code: str = "CBI"
     scholar_json: Path = Path("/opt/osti/scholar_output/latest_osti_scholar_records.json")
 
+    direct_osti_discovery: bool = True
+    direct_osti_queries: tuple[str, ...] = ('"Center for Bioenergy Innovation"',)
+    direct_osti_match_terms: tuple[str, ...] = (
+        "Center for Bioenergy Innovation",
+        "Center for Bioenergy Innovation (CBI)",
+    )
+    direct_osti_rows: int = 100
+    
     validate_brc_output: bool = True
     validation_strict: bool = True
     resume_from_latest: bool = False
@@ -153,6 +161,12 @@ def parse_bool(value: str | None, default: bool) -> bool:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
+
+def parse_csv(value: str | None, default: tuple[str, ...]) -> tuple[str, ...]:
+    if value is None:
+        return default
+    items = tuple(item.strip() for item in value.split("|") if item.strip())
+    return items or default
 
 def load_dotenv(path: Path) -> dict[str, str]:
     env: dict[str, str] = {}
@@ -197,6 +211,24 @@ def load_settings() -> tuple[Settings, str | None]:
         pages_api_url=get("PAGES_API_URL", "https://www.osti.gov/pages/api/v1/records"),
         site_ownership_code=get("SITE_OWNERSHIP_CODE", "CBI"),
         scholar_json=Path(get("SCHOLAR_JSON", "/opt/osti/scholar_output/latest_osti_scholar_records.json")),
+        
+        direct_osti_discovery=parse_bool(get("DIRECT_OSTI_DISCOVERY", "1"), True),
+        direct_osti_queries=parse_csv(
+            get("DIRECT_OSTI_QUERIES", '"Center for Bioenergy Innovation"'),
+            ('"Center for Bioenergy Innovation"',),
+        ),
+        direct_osti_match_terms=parse_csv(
+            get(
+                "DIRECT_OSTI_MATCH_TERMS",
+                "Center for Bioenergy Innovation|Center for Bioenergy Innovation (CBI)",
+            ),
+            ("Center for Bioenergy Innovation", "Center for Bioenergy Innovation (CBI)"),
+        ),
+        direct_osti_rows=int(get("DIRECT_OSTI_ROWS", "100")),
+        
+        
+        
+        
         validate_brc_output=parse_bool(get("VALIDATE_BRC_OUTPUT", "1"), True),
         validation_strict=parse_bool(get("VALIDATION_STRICT", "1"), True),
         resume_from_latest=parse_bool(get("RESUME_FROM_LATEST", "0"), False),
@@ -262,6 +294,68 @@ def load_osti_ids(scholar_json: Path) -> list[str]:
         if isinstance(item, dict) and item.get("osti_id") is not None
     }
     return sorted(i for i in ids if i)
+
+def record_contains_any_term(record: dict[str, Any], terms: tuple[str, ...]) -> bool:
+    haystack = " ".join(
+        json.dumps(record.get(key, ""), ensure_ascii=False)
+        for key in (
+            "research_orgs",
+            "sponsor_orgs",
+            "contributing_org",
+            "contributor_org",
+            "title",
+            "description",
+            "subjects",
+            "keywords",
+        )
+    ).lower()
+    return any(term.lower() in haystack for term in terms)
+
+
+def discover_osti_ids_from_pages(settings: Settings, run_log: Path) -> list[str]:
+    if not settings.direct_osti_discovery:
+        log_line("direct_osti_discovery=disabled", run_log)
+        return []
+
+    session = requests.Session()
+    discovered: set[str] = set()
+    for query in settings.direct_osti_queries:
+        try:
+            resp = session.get(
+                settings.pages_api_url,
+                params={
+                    "q": query,
+                    "sort": "entry_date desc",
+                    "rows": settings.direct_osti_rows,
+                },
+                timeout=30,
+            )
+            resp.raise_for_status()
+            body = resp.json()
+        except Exception as exc:
+            log_line(f"WARN: direct_osti_query={query!r} status=failed error={exc}", run_log)
+            continue
+
+        records = body if isinstance(body, list) else []
+        matched = 0
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            osti_id = str(record.get("osti_id", "")).strip()
+            if not osti_id:
+                continue
+            if not record_contains_any_term(record, settings.direct_osti_match_terms):
+                continue
+            discovered.add(osti_id)
+            matched += 1
+        log_line(
+            f"direct_osti_query={query!r} returned={len(records)} matched={matched}",
+            run_log,
+        )
+
+    return sorted(discovered, key=lambda value: int(value) if value.isdigit() else value)
+
+
 
 
 def is_pages_publication(body: Any) -> bool:
@@ -572,10 +666,19 @@ def run() -> int:
         return 1
 
     try:
-        osti_ids = load_osti_ids(settings.scholar_json)
+        scholar_osti_ids = load_osti_ids(settings.scholar_json)
     except Exception as exc:
         log_line(f"ERROR: {exc}", run_log)
         return 1
+
+    direct_osti_ids = discover_osti_ids_from_pages(settings, run_log)
+    osti_ids = sorted(
+        set(scholar_osti_ids) | set(direct_osti_ids),
+        key=lambda value: int(value) if value.isdigit() else value,
+    )
+
+    log_line(f"scholar_osti_ids_loaded={len(scholar_osti_ids)}", run_log)
+    log_line(f"direct_osti_ids_loaded={len(direct_osti_ids)}", run_log)
 
     log_line(f"osti_ids_loaded={len(osti_ids)}", run_log)
 
