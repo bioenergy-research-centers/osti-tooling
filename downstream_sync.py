@@ -687,6 +687,48 @@ def publish_file(src: Path, dst: Path, run_log: Path) -> None:
     log_line(f"WARN: unable to publish {dst} (direct and sudo -n failed)", run_log)
 
 
+def merge_additive_brc_feed(generated: Path, existing: Path, run_log: Path) -> None:
+    if not existing.exists():
+        return
+
+    generated_payload = json.loads(generated.read_text(encoding="utf-8"))
+    existing_payload = json.loads(existing.read_text(encoding="utf-8"))
+    generated_datasets = generated_payload.get("datasets", [])
+    existing_datasets = existing_payload.get("datasets", [])
+    if not isinstance(generated_datasets, list) or not isinstance(existing_datasets, list):
+        raise ValueError("CBI feed must contain a datasets list")
+
+    def identity(dataset: dict[str, Any]) -> str | None:
+        for field in ("identifier", "dataset_url", "bibliographicCitation"):
+            value = dataset.get(field)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return None
+
+    merged: dict[str, dict[str, Any]] = {}
+    anonymous: list[dict[str, Any]] = []
+    for dataset in existing_datasets + generated_datasets:
+        if not isinstance(dataset, dict):
+            continue
+        key = identity(dataset)
+        if key is None:
+            anonymous.append(dataset)
+        else:
+            merged[key] = dataset
+
+    merged_payload = {
+        "schema_version": generated_payload.get(
+            "schema_version", existing_payload.get("schema_version", "unknown")
+        ),
+        "datasets": list(merged.values()) + anonymous,
+    }
+    generated.write_text(json.dumps(merged_payload, indent=2) + "\n", encoding="utf-8")
+    log_line(
+        f"publish_additive existing={len(existing_datasets)} generated={len(generated_datasets)} merged={len(merged_payload['datasets'])}",
+        run_log,
+    )
+
+
 def update_symlink(link_path: Path, target_path: Path, run_log: Path | None = None) -> None:
     try:
         link_path.parent.mkdir(parents=True, exist_ok=True)
@@ -905,6 +947,8 @@ def run() -> int:
 
     brc_json.write_text(json.dumps(brc_payload, indent=2) + "\n", encoding="utf-8")
     log_line(f"brc_schema_version={brc_schema_version}", run_log)
+
+    merge_additive_brc_feed(brc_json, settings.web_brc_json, run_log)
 
     if settings.validate_brc_output:
         errors, warnings, details, rc = validate_brc(
