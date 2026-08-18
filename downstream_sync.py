@@ -932,10 +932,11 @@ def run() -> int:
 
     update_symlink(settings.brc_out_dir / "latest_brc_datasets.json", brc_json)
 
-    update_symlink(Path("/opt/osti/latest_osti_records.json"), settings.elink_out_dir / "latest_osti_records.json", run_log)
-    update_symlink(Path("/opt/osti/latest_osti_publications.json"), settings.elink_out_dir / "latest_osti_publications.json", run_log)
-    update_symlink(Path("/opt/osti/latest_osti_datasets.json"), settings.elink_out_dir / "latest_osti_datasets.json", run_log)
-    update_symlink(Path("/opt/osti/latest_brc_datasets.json"), settings.brc_out_dir / "latest_brc_datasets.json", run_log)
+    workspace_root = settings.state_dir.parent
+    update_symlink(workspace_root / "latest_osti_records.json", settings.elink_out_dir / "latest_osti_records.json", run_log)
+    update_symlink(workspace_root / "latest_osti_publications.json", settings.elink_out_dir / "latest_osti_publications.json", run_log)
+    update_symlink(workspace_root / "latest_osti_datasets.json", settings.elink_out_dir / "latest_osti_datasets.json", run_log)
+    update_symlink(workspace_root / "latest_brc_datasets.json", settings.brc_out_dir / "latest_brc_datasets.json", run_log)
 
     publish_file(osti_json, settings.web_osti_json, run_log)
     publish_file(brc_json, settings.web_brc_json, run_log)
