@@ -508,6 +508,7 @@ def sanitize_media(record: dict[str, Any]) -> dict[str, Any]:
         m.pop("input_code", None)
         m.pop("date_released", None)
         m.pop("workflow_status", None)
+        m.pop("access_limitations", None)
         m = {k: v for k, v in m.items() if k in MEDIA_ALLOWED_KEYS}
 
         files = m.get("files")
@@ -842,7 +843,11 @@ def run() -> int:
     raw = json.loads(osti_json.read_text(encoding="utf-8"))
     all_records = raw.get("records", []) if isinstance(raw, dict) else []
     pubs = [r for r in all_records if isinstance(r, dict) and r.get("product_type") in PUBLICATION_TYPES]
-    data = [r for r in all_records if isinstance(r, dict) and r.get("product_type") == "Dataset"]
+    data = [
+        r
+        for r in all_records
+        if isinstance(r, dict) and r.get("product_type") in {"Dataset", "DA"}
+    ]
 
     osti_pubs_json.write_text(json.dumps({"records": pubs}, indent=2) + "\n", encoding="utf-8")
     log_line(f"elink_publications_count={len(pubs)}", run_log)

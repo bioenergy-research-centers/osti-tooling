@@ -60,7 +60,7 @@ SCHOLAR_URL = (
 
 OSTI_SEARCH_BASE = "https://www.osti.gov/search/semantic:"
 OSTI_BIBLIO_BASE = "https://www.osti.gov/biblio/"
-LIVE_CBI_JSON = Path("/var/www/html/cbi.json")
+LIVE_CBI_JSON = Path(os.getenv("SCRAPER_DEDUPE_JSON", "/var/www/html/cbi.json"))
 DEFAULT_DEV_SAMPLE = 10
 
 # Stop traversing Scholar pages when a publication year <= this value is seen.
