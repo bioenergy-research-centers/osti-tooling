@@ -115,7 +115,10 @@ Inside `downstream_sync.py`, OSTI IDs come from:
 - the persisted Scholar ID cache, and
 - a bounded "recent site dataset" discovery query against the public OSTI API
   (defaults: last 14 days, max 40 IDs), which helps catch newly released
-  CBI datasets before Scholar indexing catches up.
+  CBI datasets before Scholar indexing catches up. That fallback now queries
+  recent records by `subject=CBI` and filters to datasets in code, because the
+  public API's `site_ownership_code` / `product_type` filters can miss valid
+  CBI dataset records.
 
 ## Configuration
 

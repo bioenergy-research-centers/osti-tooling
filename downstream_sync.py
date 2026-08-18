@@ -370,8 +370,10 @@ def load_recent_site_dataset_ids(settings: Settings, run_log: Path) -> list[str]
     end_date = datetime.now(UTC).date()
     start_date = end_date - timedelta(days=settings.recent_site_lookback_days)
     params = {
-        "site_ownership_code": settings.site_ownership_code,
-        "product_type": "Dataset",
+        # The public API reliably returns recent CBI records when queried by
+        # subject, but site_ownership_code/product_type filters can silently
+        # return empty results for datasets that do exist.
+        "subject": settings.site_ownership_code,
         "entry_date_start": start_date.strftime("%m/%d/%Y"),
         "entry_date_end": end_date.strftime("%m/%d/%Y"),
         "sort": "entry_date",
@@ -392,16 +394,31 @@ def load_recent_site_dataset_ids(settings: Settings, run_log: Path) -> list[str]
     elif isinstance(payload, dict):
         records = [payload]
 
+    matched_records = []
+    site_code = settings.site_ownership_code.strip().lower()
+    for record in records:
+        subjects = record.get("subjects")
+        if not isinstance(subjects, list):
+            continue
+        subject_values = {str(subject).strip().lower() for subject in subjects}
+        if site_code and site_code not in subject_values:
+            continue
+        if str(record.get("product_type", "")).strip() != "Dataset":
+            continue
+        matched_records.append(record)
+
     ids = sorted(
         {
             str(record.get("osti_id")).strip()
-            for record in records
+            for record in matched_records
             if str(record.get("osti_id", "")).strip()
         }
     )
     log_line(
         (
             "recent_site_discovery status=ok "
+            f"returned={len(records)} "
+            f"matched={len(matched_records)} "
             f"ids={len(ids)} "
             f"lookback_days={settings.recent_site_lookback_days} "
             f"max_ids={settings.recent_site_max_ids}"
