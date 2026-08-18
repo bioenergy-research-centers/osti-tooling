@@ -110,8 +110,12 @@ Published files are copied to:
 - `/var/www/html/CBI/cbi_osti.json` - All records (backward compatible)
 - `/var/www/html/cbi.json` - BRC datasets (append-only, validated before publish)
 
-The downstream OSTI sync runs only when the scholar cache changes.
-If the scrape output is unchanged, downstream processing is skipped.
+The GitHub Actions workflow runs downstream sync explicitly on each run.
+Inside `downstream_sync.py`, OSTI IDs come from:
+- the persisted Scholar ID cache, and
+- a bounded "recent site dataset" discovery query against the public OSTI API
+  (defaults: last 14 days, max 40 IDs), which helps catch newly released
+  CBI datasets before Scholar indexing catches up.
 
 ## Configuration
 
@@ -128,8 +132,14 @@ LOCK_FILE="$OSTI_ROOT/state/osti_hourly_sync.lock"
 # API configuration (required)
 ELINK_BEARER_TOKEN="your-bearer-token"  # OR use /var/www/OSTI_config.ini
 ELINK_API_URL="https://www.osti.gov/elink2api/records"
+PUBLIC_API_URL="https://www.osti.gov/api/v1/records"
 SITE_OWNERSHIP_CODE="CBI"
 ELINK_PAGE_SIZE="500"
+
+# Optional bounded fallback discovery (keeps runtime predictable)
+ENABLE_RECENT_SITE_DISCOVERY="1"
+RECENT_SITE_LOOKBACK_DAYS="14"
+RECENT_SITE_MAX_IDS="40"
 
 # Web publishing
 WEB_OSTI_JSON="/var/www/html/CBI/cbi_osti.json"

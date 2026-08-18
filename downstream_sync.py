@@ -21,7 +21,7 @@ import sys
 import time
 from configparser import ConfigParser
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -125,8 +125,12 @@ class Settings:
     config_ini: Path = Path("/var/www/OSTI_config.ini")
     elink_api_url: str = "https://www.osti.gov/elink2api/records/"
     pages_api_url: str = "https://www.osti.gov/pages/api/v1/records"
+    public_api_url: str = "https://www.osti.gov/api/v1/records"
     site_ownership_code: str = "CBI"
     scholar_json: Path = Path("/opt/osti/scholar_output/latest_osti_scholar_records.json")
+    enable_recent_site_discovery: bool = True
+    recent_site_lookback_days: int = 14
+    recent_site_max_ids: int = 40
 
     direct_osti_discovery: bool = True
     direct_osti_queries: tuple[str, ...] = ('"Center for Bioenergy Innovation"',)
@@ -209,9 +213,9 @@ def load_settings() -> tuple[Settings, str | None]:
         config_ini=Path(get("CONFIG_INI", "/var/www/OSTI_config.ini")),
         elink_api_url=get("ELINK_API_URL", "https://www.osti.gov/elink2api/records/"),
         pages_api_url=get("PAGES_API_URL", "https://www.osti.gov/pages/api/v1/records"),
+        public_api_url=get("PUBLIC_API_URL", "https://www.osti.gov/api/v1/records"),
         site_ownership_code=get("SITE_OWNERSHIP_CODE", "CBI"),
         scholar_json=Path(get("SCHOLAR_JSON", "/opt/osti/scholar_output/latest_osti_scholar_records.json")),
-        
         direct_osti_discovery=parse_bool(get("DIRECT_OSTI_DISCOVERY", "1"), True),
         direct_osti_queries=parse_csv(
             get("DIRECT_OSTI_QUERIES", '"Center for Bioenergy Innovation"'),
@@ -225,10 +229,9 @@ def load_settings() -> tuple[Settings, str | None]:
             ("Center for Bioenergy Innovation", "Center for Bioenergy Innovation (CBI)"),
         ),
         direct_osti_rows=int(get("DIRECT_OSTI_ROWS", "100")),
-        
-        
-        
-        
+        enable_recent_site_discovery=parse_bool(get("ENABLE_RECENT_SITE_DISCOVERY", "1"), True),
+        recent_site_lookback_days=max(0, int(get("RECENT_SITE_LOOKBACK_DAYS", "14"))),
+        recent_site_max_ids=max(1, int(get("RECENT_SITE_MAX_IDS", "40"))),
         validate_brc_output=parse_bool(get("VALIDATE_BRC_OUTPUT", "1"), True),
         validation_strict=parse_bool(get("VALIDATION_STRICT", "1"), True),
         resume_from_latest=parse_bool(get("RESUME_FROM_LATEST", "0"), False),
@@ -356,6 +359,56 @@ def discover_osti_ids_from_pages(settings: Settings, run_log: Path) -> list[str]
     return sorted(discovered, key=lambda value: int(value) if value.isdigit() else value)
 
 
+
+
+def load_recent_site_dataset_ids(settings: Settings, run_log: Path) -> list[str]:
+    """Query a bounded recent window of site datasets and return discovered OSTI IDs."""
+    if not settings.enable_recent_site_discovery:
+        log_line("recent_site_discovery status=disabled", run_log)
+        return []
+
+    end_date = datetime.now(UTC).date()
+    start_date = end_date - timedelta(days=settings.recent_site_lookback_days)
+    params = {
+        "site_ownership_code": settings.site_ownership_code,
+        "product_type": "Dataset",
+        "entry_date_start": start_date.strftime("%m/%d/%Y"),
+        "entry_date_end": end_date.strftime("%m/%d/%Y"),
+        "sort": "entry_date",
+        "order": "desc",
+        "rows": settings.recent_site_max_ids,
+    }
+    try:
+        resp = requests.get(settings.public_api_url, params=params, timeout=30)
+        resp.raise_for_status()
+        payload = resp.json()
+    except Exception as exc:
+        log_line(f"WARN: recent_site_discovery status=failed error={exc}", run_log)
+        return []
+
+    records: list[dict[str, Any]] = []
+    if isinstance(payload, list):
+        records = [r for r in payload if isinstance(r, dict)]
+    elif isinstance(payload, dict):
+        records = [payload]
+
+    ids = sorted(
+        {
+            str(record.get("osti_id")).strip()
+            for record in records
+            if str(record.get("osti_id", "")).strip()
+        }
+    )
+    log_line(
+        (
+            "recent_site_discovery status=ok "
+            f"ids={len(ids)} "
+            f"lookback_days={settings.recent_site_lookback_days} "
+            f"max_ids={settings.recent_site_max_ids}"
+        ),
+        run_log,
+    )
+    return ids
 
 
 def is_pages_publication(body: Any) -> bool:
@@ -672,14 +725,14 @@ def run() -> int:
         return 1
 
     direct_osti_ids = discover_osti_ids_from_pages(settings, run_log)
+    recent_site_osti_ids = load_recent_site_dataset_ids(settings, run_log)
     osti_ids = sorted(
-        set(scholar_osti_ids) | set(direct_osti_ids),
+        set(scholar_osti_ids) | set(direct_osti_ids) | set(recent_site_osti_ids),
         key=lambda value: int(value) if value.isdigit() else value,
     )
-
-    log_line(f"scholar_osti_ids_loaded={len(scholar_osti_ids)}", run_log)
-    log_line(f"direct_osti_ids_loaded={len(direct_osti_ids)}", run_log)
-
+    log_line(f"osti_ids_from_scholar={len(scholar_osti_ids)}", run_log)
+    log_line(f"osti_ids_from_direct_discovery={len(direct_osti_ids)}", run_log)
+    log_line(f"osti_ids_from_recent_site_discovery={len(recent_site_osti_ids)}", run_log)
     log_line(f"osti_ids_loaded={len(osti_ids)}", run_log)
 
     records: list[dict[str, Any]] = []
