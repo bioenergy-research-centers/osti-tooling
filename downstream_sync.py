@@ -18,6 +18,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from configparser import ConfigParser
 from dataclasses import dataclass
@@ -26,8 +27,12 @@ from pathlib import Path
 from typing import Any
 
 import fcntl
+import html
 import requests
 
+
+# Ingest metadata the BRC portal writes back into the feed; not part of the BRC schema.
+PORTAL_PROVENANCE_FIELDS = ("uid", "created_at", "updated_at", "schema_version")
 
 PUBLICATION_TYPES = {
     "Journal Article",
@@ -642,6 +647,7 @@ def extract_schema_version(schema_file: Path) -> str:
 
 def validate_brc(schema_file: Path, brc_json: Path) -> tuple[int, int, str, int]:
     try:
+        from linkml.generators.jsonschemagen import JsonSchemaGenerator
         from linkml.validator import Validator
         from linkml.validator.plugins import JsonschemaValidationPlugin
         from linkml.validator.report import Severity
@@ -650,18 +656,44 @@ def validate_brc(schema_file: Path, brc_json: Path) -> tuple[int, int, str, int]
 
     try:
         instance = json.loads(brc_json.read_text(encoding="utf-8"))
-        validator = Validator(
-            schema=str(schema_file),
-            validation_plugins=[JsonschemaValidationPlugin(closed=True)],
-        )
-        report = validator.validate(instance, target_class="DatasetCollection")
+
+        # linkml always emits additionalProperties=false for nested $defs classes, so the
+        # plugin's `closed` flag cannot admit the portal's provenance fields. Patch them in.
+        json_schema = JsonSchemaGenerator(
+            str(schema_file), include_range_class_descendants=True
+        ).generate()
+        dataset_properties = json_schema.get("$defs", {}).get("Dataset", {}).get("properties")
+        if dataset_properties is None:
+            return 0, 0, "VALIDATION_RUNTIME_ERROR Dataset definition missing from JSON Schema", 3
+        for field in PORTAL_PROVENANCE_FIELDS:
+            dataset_properties.setdefault(field, {"type": "string"})
+
+        with tempfile.NamedTemporaryFile(
+            "w", suffix=".json", delete=False, encoding="utf-8"
+        ) as handle:
+            json.dump(json_schema, handle)
+            patched_schema_path = Path(handle.name)
+
+        try:
+            validator = Validator(
+                schema=str(schema_file),
+                validation_plugins=[
+                    JsonschemaValidationPlugin(json_schema_path=patched_schema_path)
+                ],
+            )
+            report = validator.validate(instance, target_class="DatasetCollection")
+        finally:
+            patched_schema_path.unlink(missing_ok=True)
+
+        # linkml renamed Severity.WARNING to Severity.WARN.
+        warn_severity = getattr(Severity, "WARN", None) or getattr(Severity, "WARNING")
         errors = [r for r in report.results if r.severity in (Severity.ERROR, Severity.FATAL)]
-        warnings = [r for r in report.results if r.severity == Severity.WARNING]
+        warnings = [r for r in report.results if r.severity == warn_severity]
         lines = [f"VALIDATION_ERRORS {len(errors)}", f"VALIDATION_WARNINGS {len(warnings)}"]
         for r in errors[:20]:
-            path = r.path or "-"
+            path = "/".join(str(part) for part in (r.context or [])) or "-"
             msg = str(r.message).replace("\n", " ")
-            lines.append(f"VALIDATION_ERROR path={path} msg={msg}")
+            lines.append(f"VALIDATION_ERROR index={r.instance_index} path={path} msg={msg}")
         return len(errors), len(warnings), "\n".join(lines), 0
     except Exception as exc:  # pragma: no cover
         return 0, 0, f"VALIDATION_RUNTIME_ERROR {exc}", 3
@@ -685,6 +717,24 @@ def publish_file(src: Path, dst: Path, run_log: Path) -> None:
             return
 
     log_line(f"WARN: unable to publish {dst} (direct and sudo -n failed)", run_log)
+
+
+def normalize_topics(dataset: dict[str, Any]) -> tuple[int, int]:
+    """OSTI metadata arrives HTML-escaped, and legacy records predate the required topic slot."""
+    topics = dataset.get("topic")
+    if not isinstance(topics, list) or not topics:
+        dataset["topic"] = ["Unknown"]
+        return 0, 1
+
+    unescaped = 0
+    for index, topic in enumerate(topics):
+        if not isinstance(topic, str):
+            continue
+        decoded = html.unescape(topic)
+        if decoded != topic:
+            topics[index] = decoded
+            unescaped += 1
+    return unescaped, 0
 
 
 def merge_additive_brc_feed(generated: Path, existing: Path, run_log: Path) -> None:
@@ -716,15 +766,21 @@ def merge_additive_brc_feed(generated: Path, existing: Path, run_log: Path) -> N
         else:
             merged[key] = dataset
 
+    merged_datasets = list(merged.values()) + anonymous
+    normalized = [normalize_topics(dataset) for dataset in merged_datasets]
+    unescaped = sum(count for count, _ in normalized)
+    backfilled = sum(count for _, count in normalized)
+
     merged_payload = {
         "schema_version": generated_payload.get(
             "schema_version", existing_payload.get("schema_version", "unknown")
         ),
-        "datasets": list(merged.values()) + anonymous,
+        "datasets": merged_datasets,
     }
     generated.write_text(json.dumps(merged_payload, indent=2) + "\n", encoding="utf-8")
     log_line(
-        f"publish_additive existing={len(existing_datasets)} generated={len(generated_datasets)} merged={len(merged_payload['datasets'])}",
+        f"publish_additive existing={len(existing_datasets)} generated={len(generated_datasets)} "
+        f"merged={len(merged_payload['datasets'])} topics_unescaped={unescaped} topics_backfilled={backfilled}",
         run_log,
     )
 
