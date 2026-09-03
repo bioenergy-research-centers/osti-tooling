@@ -1,0 +1,12 @@
+[Unit]
+Description=Run CBI OSTI sync every 6 hours
+
+[Timer]
+OnBootSec=10m
+OnUnitActiveSec=6h
+AccuracySec=5m
+Persistent=true
+Unit=osti-sync.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,3 @@
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+0 */6 * * * cloud OSTI_SYNC_ENV_FILE=/home/cloud/bioenergy_OSTI_updates/osti-sync.env /home/cloud/bioenergy_OSTI_updates/run_osti_sync.sh

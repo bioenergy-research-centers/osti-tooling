@@ -1,0 +1,16 @@
+[Unit]
+Description=CBI OSTI sync runner
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/cloud/osti/osti-tooling/deploy
+# Env file stays outside the repo: it holds ELINK_BEARER_TOKEN.
+Environment=OSTI_SYNC_ENV_FILE=/home/cloud/bioenergy_OSTI_updates/osti-sync.env
+ExecStart=/home/cloud/osti/osti-tooling/deploy/run_osti_sync.sh
+User=cloud
+Group=cloud
+
+[Install]
+WantedBy=multi-user.target
