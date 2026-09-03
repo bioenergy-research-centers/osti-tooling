@@ -149,10 +149,44 @@ class Settings:
     validation_strict: bool = True
     resume_from_latest: bool = False
     keep_runs: int = 168
+    fetch_error_ratio_limit: float = 0.25
 
 
 def now_utc() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+# 404: PAGES only indexes DOE public-access manuscripts. 403: eLink denies records
+# owned by another site. Both are routine for a Scholar-sourced ID list.
+EXPECTED_FETCH_STATUSES = {403, 404}
+
+
+def fetch_osti_body(
+    url: str, *, session: requests.Session, headers: dict[str, str] | None = None
+) -> tuple[str, str, Any]:
+    """Fetch one record. Returns (outcome, detail, body); outcome is ok|absent|error."""
+    try:
+        resp = session.get(url, headers=headers, timeout=30)
+    except requests.RequestException as exc:
+        return "error", f"network={type(exc).__name__}", None
+
+    if resp.status_code in EXPECTED_FETCH_STATUSES:
+        return "absent", f"http={resp.status_code}", None
+    if not resp.ok:
+        return "error", f"http={resp.status_code}", None
+
+    try:
+        return "ok", f"http={resp.status_code}", resp.json()
+    except ValueError:
+        return "error", "invalid_json", None
+
+
+def records_from_body(body: Any, source: str) -> list[dict[str, Any]]:
+    if isinstance(body, list):
+        return [dict(r, __source=source) for r in body if isinstance(r, dict)]
+    if isinstance(body, dict):
+        return [dict(body, __source=source)]
+    return []
 
 
 def ts_utc() -> str:
@@ -241,6 +275,7 @@ def load_settings() -> tuple[Settings, str | None]:
         validation_strict=parse_bool(get("VALIDATION_STRICT", "1"), True),
         resume_from_latest=parse_bool(get("RESUME_FROM_LATEST", "0"), False),
         keep_runs=int(get("KEEP_RUNS", "168")),
+        fetch_error_ratio_limit=float(get("FETCH_ERROR_RATIO_LIMIT", "0.25")),
     )
 
     token = os.getenv("ELINK_BEARER_TOKEN", env_file.get("ELINK_BEARER_TOKEN"))
@@ -864,61 +899,98 @@ def run() -> int:
     else:
         session = requests.Session()
         elink_success = 0
-        elink_failed = 0
+        elink_absent = 0
+        elink_errors = 0
         elink_skipped = 0
+        elink_attempts = 0
         pages_success = 0
-        pages_failed = 0
+        pages_absent = 0
+        pages_errors = 0
+        attempts = 0
 
         for osti_id in osti_ids:
             pages_publication = False
 
             # PAGES API first.
-            try:
-                pages_resp = session.get(f"{settings.pages_api_url}/{osti_id}", timeout=30)
-                pages_resp.raise_for_status()
-                body = pages_resp.json()
-                if isinstance(body, list):
-                    records.extend([dict(r, __source="pages") for r in body if isinstance(r, dict)])
-                elif isinstance(body, dict):
-                    records.append(dict(body, __source="pages"))
+            attempts += 1
+            outcome, detail, body = fetch_osti_body(f"{settings.pages_api_url}/{osti_id}", session=session)
+            if outcome == "ok":
+                records.extend(records_from_body(body, "pages"))
                 pages_publication = is_pages_publication(body)
                 pages_success += 1
                 log_line(f"pages osti_id={osti_id} status=ok", run_log)
-            except Exception:
-                pages_failed += 1
-                log_line(f"WARN: pages osti_id={osti_id} status=failed", run_log)
+            elif outcome == "absent":
+                pages_absent += 1
+                log_line(f"pages osti_id={osti_id} status=absent {detail}", run_log)
+            else:
+                pages_errors += 1
+                log_line(f"WARN: pages osti_id={osti_id} status=error {detail}", run_log)
 
             # E-Link API only if pages did not classify as publication.
             if pages_publication:
                 elink_skipped += 1
                 log_line(f"elink osti_id={osti_id} status=skipped_pages_publication", run_log)
             else:
-                try:
-                    elink_resp = session.get(
-                        f"{settings.elink_api_url}{osti_id}",
-                        headers={"Authorization": f"Bearer {token}"},
-                        timeout=30,
-                    )
-                    elink_resp.raise_for_status()
-                    body = elink_resp.json()
-                    if isinstance(body, list):
-                        records.extend([dict(r, __source="elink") for r in body if isinstance(r, dict)])
-                    elif isinstance(body, dict):
-                        records.append(dict(body, __source="elink"))
+                attempts += 1
+                elink_attempts += 1
+                outcome, detail, body = fetch_osti_body(
+                    f"{settings.elink_api_url}{osti_id}",
+                    session=session,
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+                if outcome == "ok":
+                    records.extend(records_from_body(body, "elink"))
                     elink_success += 1
                     log_line(f"elink osti_id={osti_id} status=ok", run_log)
-                except Exception:
-                    elink_failed += 1
-                    log_line(f"WARN: elink osti_id={osti_id} status=failed", run_log)
+                elif outcome == "absent":
+                    elink_absent += 1
+                    log_line(f"elink osti_id={osti_id} status=denied {detail}", run_log)
+                else:
+                    elink_errors += 1
+                    log_line(f"WARN: elink osti_id={osti_id} status=error {detail}", run_log)
 
             time.sleep(0.1)
 
         log_line(
-            f"elink_success={elink_success} elink_failed={elink_failed} elink_skipped={elink_skipped}",
+            f"elink_success={elink_success} elink_denied={elink_absent} "
+            f"elink_errors={elink_errors} elink_skipped={elink_skipped}",
             run_log,
         )
-        log_line(f"pages_success={pages_success} pages_failed={pages_failed}", run_log)
+        log_line(
+            f"pages_success={pages_success} pages_absent={pages_absent} pages_errors={pages_errors}",
+            run_log,
+        )
         log_line(f"id_count={elink_success}", run_log)
+
+        fetch_errors = pages_errors + elink_errors
+        error_ratio = fetch_errors / attempts if attempts else 0.0
+        log_line(
+            f"fetch_attempts={attempts} fetch_errors={fetch_errors} error_ratio={error_ratio:.3f}",
+            run_log,
+        )
+        if fetch_errors and error_ratio > settings.fetch_error_ratio_limit:
+            log_line(
+                f"ERROR: fetch error ratio {error_ratio:.3f} exceeds limit "
+                f"{settings.fetch_error_ratio_limit:.3f}; refusing to publish a partial feed",
+                run_log,
+            )
+            return 1
+        if osti_ids and not records:
+            log_line(
+                "ERROR: no records retrieved for any of the discovered OSTI IDs "
+                "(check ELINK_BEARER_TOKEN and OSTI availability)",
+                run_log,
+            )
+            return 1
+        # An expired token returns 403, indistinguishable per-record from a genuine
+        # ownership denial, so treat a clean sweep of denials as an auth failure.
+        if elink_attempts and not elink_success and elink_absent:
+            log_line(
+                f"ERROR: all {elink_attempts} eLink requests were denied and none succeeded; "
+                "ELINK_BEARER_TOKEN is likely expired or revoked",
+                run_log,
+            )
+            return 1
 
         merged = merge_duplicate_osti_ids(records)
         cleaned_records: list[dict[str, Any]] = []
