@@ -1,2 +1,7 @@
 __pycache__/
 *.pyc
+
+# Local deployment env files (contain ELINK_BEARER_TOKEN)
+osti-sync.env
+*.env
+!*.env.example
