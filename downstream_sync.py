@@ -12,19 +12,20 @@ This script mirrors the former shell workflow:
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
-import tempfile
 import time
 from configparser import ConfigParser
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote, unquote
 
 import fcntl
 import html
@@ -682,7 +683,6 @@ def extract_schema_version(schema_file: Path) -> str:
 
 def validate_brc(schema_file: Path, brc_json: Path) -> tuple[int, int, str, int]:
     try:
-        from linkml.generators.jsonschemagen import JsonSchemaGenerator
         from linkml.validator import Validator
         from linkml.validator.plugins import JsonschemaValidationPlugin
         from linkml.validator.report import Severity
@@ -691,35 +691,12 @@ def validate_brc(schema_file: Path, brc_json: Path) -> tuple[int, int, str, int]
 
     try:
         instance = json.loads(brc_json.read_text(encoding="utf-8"))
-
-        # linkml always emits additionalProperties=false for nested $defs classes, so the
-        # plugin's `closed` flag cannot admit the portal's provenance fields. Patch them in.
-        json_schema = JsonSchemaGenerator(
-            str(schema_file), include_range_class_descendants=True
-        ).generate()
-        dataset_properties = json_schema.get("$defs", {}).get("Dataset", {}).get("properties")
-        if dataset_properties is None:
-            return 0, 0, "VALIDATION_RUNTIME_ERROR Dataset definition missing from JSON Schema", 3
-        for field in PORTAL_PROVENANCE_FIELDS:
-            dataset_properties.setdefault(field, {"type": "string"})
-
-        with tempfile.NamedTemporaryFile(
-            "w", suffix=".json", delete=False, encoding="utf-8"
-        ) as handle:
-            json.dump(json_schema, handle)
-            patched_schema_path = Path(handle.name)
-
-        try:
-            validator = Validator(
-                schema=str(schema_file),
-                validation_plugins=[
-                    JsonschemaValidationPlugin(json_schema_path=patched_schema_path)
-                ],
-            )
-            report = validator.validate(instance, target_class="DatasetCollection")
-        finally:
-            patched_schema_path.unlink(missing_ok=True)
-
+        # Closed, to match how bioenergy.org validates the published feed.
+        validator = Validator(
+            schema=str(schema_file),
+            validation_plugins=[JsonschemaValidationPlugin(closed=True)],
+        )
+        report = validator.validate(instance, target_class="DatasetCollection")
         # linkml renamed Severity.WARNING to Severity.WARN.
         warn_severity = getattr(Severity, "WARN", None) or getattr(Severity, "WARNING")
         errors = [r for r in report.results if r.severity in (Severity.ERROR, Severity.FATAL)]
@@ -772,6 +749,47 @@ def normalize_topics(dataset: dict[str, Any]) -> tuple[int, int]:
     return unescaped, 0
 
 
+def normalize_dataset_url(value: Any) -> Any:
+    """Return a URI string from transformed OSTI links and encode unsafe spaces."""
+    if isinstance(value, list):
+        value = next((item for item in value if item), None)
+    if isinstance(value, dict):
+        value = value.get("href")
+    if not isinstance(value, str):
+        return value
+
+    value = value.strip()
+    # brc-schema e681543 percent-encodes the string representation of an
+    # OSTI link object instead of extracting its href.
+    if value.startswith("%7B"):
+        try:
+            decoded = ast.literal_eval(unquote(value))
+        except (SyntaxError, ValueError):
+            decoded = None
+        if isinstance(decoded, dict) and decoded.get("href"):
+            value = str(decoded["href"]).strip()
+    return quote(value, safe=":/?#[]@!$&'()*+,;=%~")
+
+
+def normalize_dataset_urls(datasets: list[Any]) -> int:
+    """Normalize dataset URLs in place and return the number changed."""
+    changed = 0
+    for dataset in datasets:
+        if not isinstance(dataset, dict) or "dataset_url" not in dataset:
+            continue
+        before = dataset.get("dataset_url")
+        after = normalize_dataset_url(before)
+        if after != before:
+            dataset["dataset_url"] = after
+            changed += 1
+    return changed
+
+
+def strip_portal_provenance(dataset: dict[str, Any]) -> int:
+    """The portal stamps these on ingest; echoing them back fails its closed-schema check."""
+    return sum(dataset.pop(field, None) is not None for field in PORTAL_PROVENANCE_FIELDS)
+
+
 def merge_additive_brc_feed(generated: Path, existing: Path, run_log: Path) -> None:
     if not existing.exists():
         return
@@ -805,6 +823,8 @@ def merge_additive_brc_feed(generated: Path, existing: Path, run_log: Path) -> N
     normalized = [normalize_topics(dataset) for dataset in merged_datasets]
     unescaped = sum(count for count, _ in normalized)
     backfilled = sum(count for _, count in normalized)
+    urls_normalized = normalize_dataset_urls(merged_datasets)
+    stripped = sum(strip_portal_provenance(dataset) for dataset in merged_datasets)
 
     merged_payload = {
         "schema_version": generated_payload.get(
@@ -815,7 +835,9 @@ def merge_additive_brc_feed(generated: Path, existing: Path, run_log: Path) -> N
     generated.write_text(json.dumps(merged_payload, indent=2) + "\n", encoding="utf-8")
     log_line(
         f"publish_additive existing={len(existing_datasets)} generated={len(generated_datasets)} "
-        f"merged={len(merged_payload['datasets'])} topics_unescaped={unescaped} topics_backfilled={backfilled}",
+        f"merged={len(merged_payload['datasets'])} topics_unescaped={unescaped} "
+        f"topics_backfilled={backfilled} dataset_urls_normalized={urls_normalized} "
+        f"provenance_fields_stripped={stripped}",
         run_log,
     )
 
@@ -1063,12 +1085,10 @@ def run() -> int:
         brc_payload.pop("@type", None)
         datasets = brc_payload.get("datasets")
         if isinstance(datasets, list):
+            normalize_dataset_urls(datasets)
             for ds in datasets:
                 if not isinstance(ds, dict):
                     continue
-                durl = ds.get("dataset_url")
-                if isinstance(durl, dict):
-                    ds["dataset_url"] = durl.get("href")
                 if not str(ds.get("brc", "")).strip() and settings.site_ownership_code:
                     ds["brc"] = settings.site_ownership_code
         brc_payload = {"schema_version": brc_schema_version} | brc_payload

@@ -5,6 +5,7 @@ This workspace contains a Linux-native replacement for the scheduled GitHub Acti
 ## Files
 
 - `run_osti_sync.sh`: non-interactive runner that refreshes all three repos, stages the scraper dedupe input, refreshes scholar cache, always runs downstream sync, snapshots outputs, and commits/pushes `brc_data_feeds/cbi.json` only when it changed.
+- `notify_osti_failure.sh`: sends a failure summary and workflow-log tail through Postfix's `sendmail` interface.
 - `osti-sync.env.example`: machine-specific configuration template.
 - `systemd/osti-sync.service`: `systemd` unit for the runner.
 - `systemd/osti-sync.timer`: 6-hour schedule.
@@ -67,6 +68,7 @@ Minimum values to confirm in `osti-sync.env`:
 - `WEB_OSTI_JSON`
 - `WEB_PUBLICATIONS_JSON`
 - `SCHOLAR_PYTHON_BIN`
+- `ALERT_EMAIL`
 
 ## Manual run
 
@@ -106,6 +108,18 @@ sudo systemctl status osti-sync.timer
 ```
 
 Adjust `User`, `Group`, `WorkingDirectory`, and `OSTI_SYNC_ENV_FILE` in `systemd/osti-sync.service` before installation if this workspace path differs from the target host path.
+
+### Failure email alerts
+
+Set `ALERT_EMAIL` and, optionally, `ALERT_FROM` in the machine's `osti-sync.env`.
+The service's `ExecStopPost` hook runs after every attempt, exits silently after
+successful runs, and sends an email through `/usr/sbin/sendmail` after failures.
+The message includes the systemd result, exit status, and the last
+`ALERT_LOG_LINES` lines of the workflow log.
+
+After changing the unit or environment file, reinstall the unit and run
+`sudo systemctl daemon-reload`. Use a non-production failure test to verify
+relay delivery before relying on the alert.
 
 ## Cron alternative
 
