@@ -12,6 +12,7 @@ This script mirrors the former shell workflow:
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 import re
@@ -25,6 +26,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote, unquote
 
 import fcntl
 import html
@@ -772,6 +774,42 @@ def normalize_topics(dataset: dict[str, Any]) -> tuple[int, int]:
     return unescaped, 0
 
 
+def normalize_dataset_url(value: Any) -> Any:
+    """Return a URI string from transformed OSTI links and encode unsafe spaces."""
+    if isinstance(value, list):
+        value = next((item for item in value if item), None)
+    if isinstance(value, dict):
+        value = value.get("href")
+    if not isinstance(value, str):
+        return value
+
+    value = value.strip()
+    # brc-schema e681543 percent-encodes the string representation of an
+    # OSTI link object instead of extracting its href.
+    if value.startswith("%7B"):
+        try:
+            decoded = ast.literal_eval(unquote(value))
+        except (SyntaxError, ValueError):
+            decoded = None
+        if isinstance(decoded, dict) and decoded.get("href"):
+            value = str(decoded["href"]).strip()
+    return quote(value, safe=":/?#[]@!$&'()*+,;=%~")
+
+
+def normalize_dataset_urls(datasets: list[Any]) -> int:
+    """Normalize dataset URLs in place and return the number changed."""
+    changed = 0
+    for dataset in datasets:
+        if not isinstance(dataset, dict) or "dataset_url" not in dataset:
+            continue
+        before = dataset.get("dataset_url")
+        after = normalize_dataset_url(before)
+        if after != before:
+            dataset["dataset_url"] = after
+            changed += 1
+    return changed
+
+
 def merge_additive_brc_feed(generated: Path, existing: Path, run_log: Path) -> None:
     if not existing.exists():
         return
@@ -805,6 +843,7 @@ def merge_additive_brc_feed(generated: Path, existing: Path, run_log: Path) -> N
     normalized = [normalize_topics(dataset) for dataset in merged_datasets]
     unescaped = sum(count for count, _ in normalized)
     backfilled = sum(count for _, count in normalized)
+    urls_normalized = normalize_dataset_urls(merged_datasets)
 
     merged_payload = {
         "schema_version": generated_payload.get(
@@ -815,7 +854,8 @@ def merge_additive_brc_feed(generated: Path, existing: Path, run_log: Path) -> N
     generated.write_text(json.dumps(merged_payload, indent=2) + "\n", encoding="utf-8")
     log_line(
         f"publish_additive existing={len(existing_datasets)} generated={len(generated_datasets)} "
-        f"merged={len(merged_payload['datasets'])} topics_unescaped={unescaped} topics_backfilled={backfilled}",
+        f"merged={len(merged_payload['datasets'])} topics_unescaped={unescaped} "
+        f"topics_backfilled={backfilled} dataset_urls_normalized={urls_normalized}",
         run_log,
     )
 
@@ -1063,12 +1103,10 @@ def run() -> int:
         brc_payload.pop("@type", None)
         datasets = brc_payload.get("datasets")
         if isinstance(datasets, list):
+            normalize_dataset_urls(datasets)
             for ds in datasets:
                 if not isinstance(ds, dict):
                     continue
-                durl = ds.get("dataset_url")
-                if isinstance(durl, dict):
-                    ds["dataset_url"] = durl.get("href")
                 if not str(ds.get("brc", "")).strip() and settings.site_ownership_code:
                     ds["brc"] = settings.site_ownership_code
         brc_payload = {"schema_version": brc_schema_version} | brc_payload
