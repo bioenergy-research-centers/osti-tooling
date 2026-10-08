@@ -19,7 +19,6 @@ import re
 import shutil
 import subprocess
 import sys
-import tempfile
 import time
 from configparser import ConfigParser
 from dataclasses import dataclass
@@ -684,7 +683,6 @@ def extract_schema_version(schema_file: Path) -> str:
 
 def validate_brc(schema_file: Path, brc_json: Path) -> tuple[int, int, str, int]:
     try:
-        from linkml.generators.jsonschemagen import JsonSchemaGenerator
         from linkml.validator import Validator
         from linkml.validator.plugins import JsonschemaValidationPlugin
         from linkml.validator.report import Severity
@@ -693,35 +691,12 @@ def validate_brc(schema_file: Path, brc_json: Path) -> tuple[int, int, str, int]
 
     try:
         instance = json.loads(brc_json.read_text(encoding="utf-8"))
-
-        # linkml always emits additionalProperties=false for nested $defs classes, so the
-        # plugin's `closed` flag cannot admit the portal's provenance fields. Patch them in.
-        json_schema = JsonSchemaGenerator(
-            str(schema_file), include_range_class_descendants=True
-        ).generate()
-        dataset_properties = json_schema.get("$defs", {}).get("Dataset", {}).get("properties")
-        if dataset_properties is None:
-            return 0, 0, "VALIDATION_RUNTIME_ERROR Dataset definition missing from JSON Schema", 3
-        for field in PORTAL_PROVENANCE_FIELDS:
-            dataset_properties.setdefault(field, {"type": "string"})
-
-        with tempfile.NamedTemporaryFile(
-            "w", suffix=".json", delete=False, encoding="utf-8"
-        ) as handle:
-            json.dump(json_schema, handle)
-            patched_schema_path = Path(handle.name)
-
-        try:
-            validator = Validator(
-                schema=str(schema_file),
-                validation_plugins=[
-                    JsonschemaValidationPlugin(json_schema_path=patched_schema_path)
-                ],
-            )
-            report = validator.validate(instance, target_class="DatasetCollection")
-        finally:
-            patched_schema_path.unlink(missing_ok=True)
-
+        # Closed, to match how bioenergy.org validates the published feed.
+        validator = Validator(
+            schema=str(schema_file),
+            validation_plugins=[JsonschemaValidationPlugin(closed=True)],
+        )
+        report = validator.validate(instance, target_class="DatasetCollection")
         # linkml renamed Severity.WARNING to Severity.WARN.
         warn_severity = getattr(Severity, "WARN", None) or getattr(Severity, "WARNING")
         errors = [r for r in report.results if r.severity in (Severity.ERROR, Severity.FATAL)]
@@ -810,6 +785,11 @@ def normalize_dataset_urls(datasets: list[Any]) -> int:
     return changed
 
 
+def strip_portal_provenance(dataset: dict[str, Any]) -> int:
+    """The portal stamps these on ingest; echoing them back fails its closed-schema check."""
+    return sum(dataset.pop(field, None) is not None for field in PORTAL_PROVENANCE_FIELDS)
+
+
 def merge_additive_brc_feed(generated: Path, existing: Path, run_log: Path) -> None:
     if not existing.exists():
         return
@@ -844,6 +824,7 @@ def merge_additive_brc_feed(generated: Path, existing: Path, run_log: Path) -> N
     unescaped = sum(count for count, _ in normalized)
     backfilled = sum(count for _, count in normalized)
     urls_normalized = normalize_dataset_urls(merged_datasets)
+    stripped = sum(strip_portal_provenance(dataset) for dataset in merged_datasets)
 
     merged_payload = {
         "schema_version": generated_payload.get(
@@ -855,7 +836,8 @@ def merge_additive_brc_feed(generated: Path, existing: Path, run_log: Path) -> N
     log_line(
         f"publish_additive existing={len(existing_datasets)} generated={len(generated_datasets)} "
         f"merged={len(merged_payload['datasets'])} topics_unescaped={unescaped} "
-        f"topics_backfilled={backfilled} dataset_urls_normalized={urls_normalized}",
+        f"topics_backfilled={backfilled} dataset_urls_normalized={urls_normalized} "
+        f"provenance_fields_stripped={stripped}",
         run_log,
     )
 
